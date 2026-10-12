@@ -1,0 +1,179 @@
+# ==============================================================================
+# TrafficVision AI - Master .gitignore
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# 1. Secrets & Environment Variables (NEVER COMMIT)
+# ------------------------------------------------------------------------------
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.cert
+*.crt
+
+# Firebase & Google Cloud Service Account Keys
+*service-account*.json
+firebase-service-account.json
+google-services.json
+GoogleService-Info.plist
+
+# Mobile Signing Keystores
+*.keystore
+*.jks
+*.p12
+
+# ------------------------------------------------------------------------------
+# 2. Python & Virtual Environments
+# ------------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Virtual Environments
+venv/
+.venv/
+env/
+ENV/
+backend/venv/
+backend/.venv/
+env.bak/
+venv.bak/
+
+# Packaging & Distribution
+build/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Testing & Linting
+.cache
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# ------------------------------------------------------------------------------
+# 3. AI / Computer Vision Models & Datasets
+# ------------------------------------------------------------------------------
+# Heavy model weights (Keep repo lightweight; download via scripts/releases)
+*.pt
+*.pth
+*.onnx
+*.weights
+*.bin
+*.safetensors
+*.engine
+*.tflite
+*.mlmodel
+
+# Ultralytics / YOLO artifacts
+runs/
+yolo*.pt
+
+# Local Test Videos & Media (prevent large commit spikes)
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.flv
+*.webm
+
+# ------------------------------------------------------------------------------
+# 4. Database & Dynamic Runtime Data
+# ------------------------------------------------------------------------------
+*.db
+*.sqlite
+*.sqlite3
+traffic.db
+
+# Generated Face Captures & Violation Challans
+captured_faces/
+backend/captured_faces/
+challans/
+backend/challans/
+*.pdf
+
+# ------------------------------------------------------------------------------
+# 5. Flutter & Dart (Frontend App)
+# ------------------------------------------------------------------------------
+**/build/
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.pub-cache/
+.pub/
+
+# Android Specific
+**/android/.gradle/
+**/android/local.properties
+**/android/app/debug/
+**/android/app/profile/
+**/android/app/release/
+**/android/captures/
+**/android/.cxx/
+
+# iOS Specific
+**/ios/Pods/
+**/ios/.symlinks/
+**/ios/Flutter/Flutter.framework
+**/ios/Flutter/Flutter.podspec
+**/ios/Flutter/Generated.xcconfig
+**/ios/Flutter/app.flx
+**/ios/Flutter/app.zip
+**/ios/Flutter/flutter_assets/
+**/ios/ServiceDefinitions.json
+
+# Web & Desktop Build Outputs
+**/web/build/
+**/windows/flutter/ephemeral/
+**/linux/flutter/ephemeral/
+**/macos/Flutter/ephemeral/
+
+# Symbolication & Obfuscation
+app.*.symbols
+app.*.map.json
+
+# ------------------------------------------------------------------------------
+# 6. IDEs & Editors
+# ------------------------------------------------------------------------------
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/
+*.sublime-project
+*.sublime-workspace
+
+# ------------------------------------------------------------------------------
+# 7. Operating System Artifacts & Logs
+# ------------------------------------------------------------------------------
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
+
+# Logs & Temporary Files
+*.log
+*.tmp
+*.bak
+*.swp
+*~
