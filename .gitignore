@@ -41,15 +41,14 @@ backend/venv/
 backend/.venv/
 env.bak/
 venv.bak/
-
 # Packaging & Distribution
 build/
 dist/
 downloads/
 eggs/
 .eggs/
-lib/
-lib64/
+backend/lib/
+backend/lib64/
 parts/
 sdist/
 var/
