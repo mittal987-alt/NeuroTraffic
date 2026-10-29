@@ -15,7 +15,22 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+# Admin emails whitelist checked at signup
+ADMIN_EMAILS = [e.strip().lower() for e in os.getenv("ADMIN_EMAILS", "").split(",") if e.strip()]
+
+# Signal state mode: "simulated" | "manual" | "api"
+SIGNAL_MODE = os.getenv("SIGNAL_MODE", "simulated").lower()
+SIGNAL_API_URL = os.getenv("SIGNAL_API_URL", "")
+
+# Privacy & Data Retention
+ENABLE_FACE_CAPTURE = os.getenv("ENABLE_FACE_CAPTURE", "false").lower() in ("true", "1", "yes")
+FACE_RETENTION_DAYS = int(os.getenv("FACE_RETENTION_DAYS", "7"))
+
+# False-positive reduction: consecutive confirmation count
+CONSECUTIVE_VIOLATION_CHECKS = int(os.getenv("CONSECUTIVE_VIOLATION_CHECKS", "3"))
+
 # Each entry is one "camera" -- it now pulls paths from your .env file
+# Entries may also contain optional "calibration_points" with "image_points" and "world_points"
 CAMERA_SOURCES = [
     {
         "id": "camera_1",

@@ -9,6 +9,7 @@ import 'dart:async';
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
+import '../services/auth_service.dart';
 
 class MjpegView extends StatefulWidget {
   final String streamUrl;
@@ -41,12 +42,24 @@ class _MjpegViewState extends State<MjpegView> {
   Future<void> _startStream() async {
     _client = http.Client();
     try {
-      final request = http.Request('GET', Uri.parse(widget.streamUrl));
+      final token = await AuthService().getToken();
+      Uri uri = Uri.parse(widget.streamUrl);
+      if (token != null && !uri.queryParameters.containsKey('token')) {
+        final queryParams = Map<String, String>.from(uri.queryParameters);
+        queryParams['token'] = token;
+        uri = uri.replace(queryParameters: queryParams);
+      }
+
+      final request = http.Request('GET', uri);
+      if (token != null) {
+        request.headers['Authorization'] = 'Bearer $token';
+      }
+
       final response = await _client!.send(request);
 
       final List<int> buffer = [];
       _subscription = response.stream.listen(
-            (chunk) {
+        (chunk) {
           buffer.addAll(chunk);
           _extractFrames(buffer);
         },

@@ -5,9 +5,9 @@
 
 import 'dart:async';
 import 'dart:convert';
-import 'package:flutter/foundation.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 import 'app_config.dart';
+import 'auth_service.dart';
 
 class LiveFrame {
   final String cameraId;
@@ -111,6 +111,7 @@ class AlertNotification {
 
 class WebSocketService {
   static String get wsUrl => AppConfig.wsUrl;
+  final _authService = AuthService();
 
   WebSocketChannel? _channel;
   final _controller = StreamController<LiveFrame>.broadcast();
@@ -120,12 +121,14 @@ class WebSocketService {
   Stream<AlertNotification> get alerts => _alertController.stream;
   bool get isConnected => _channel != null;
 
-  void connect() {
+  Future<void> connect() async {
     if (_channel != null) return;
-    _channel = WebSocketChannel.connect(Uri.parse(wsUrl));
+    final token = await _authService.getToken();
+    final effectiveWsUrl = token != null ? '$wsUrl?token=$token' : wsUrl;
+    _channel = WebSocketChannel.connect(Uri.parse(effectiveWsUrl));
 
     _channel!.stream.listen(
-          (message) {
+      (message) {
         final data = jsonDecode(message);
         if (data is Map<String, dynamic> && data['type'] == 'alert') {
           _alertController.add(AlertNotification.fromJson(data));

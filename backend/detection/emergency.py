@@ -7,6 +7,7 @@ When detected, automatically activates Green Corridor signal preemption.
 """
 
 import time
+import re
 from database import SessionLocal
 from alerts import log_alert
 from signal_state import trigger_green_corridor, is_green_corridor_active
@@ -18,6 +19,21 @@ EMERGENCY_KEYWORDS = {"AMBULANCE", "POLICE", "FIRE", "EMERGENCY", "RESCUE", "108
 # Cooldown per camera to prevent repetitive alerts for the same vehicle
 _last_emergency_trigger: dict[str, float] = {}
 COOLDOWN_SEC = 30.0
+
+
+def is_emergency_match(text: str | None) -> bool:
+    """
+    Checks if text contains an exact emergency keyword using word/token boundaries.
+    Prevents false substrings like '100' or '102' matching inside normal plates like 'MH12AB1002'.
+    """
+    if not text:
+        return False
+    upper = text.strip().upper()
+    for k in EMERGENCY_KEYWORDS:
+        pattern = rf"(?<![A-Za-z0-9]){re.escape(k)}(?![A-Za-z0-9])"
+        if re.search(pattern, upper):
+            return True
+    return False
 
 
 def check_emergency_vehicle(
@@ -34,15 +50,13 @@ def check_emergency_vehicle(
     is_emergency = False
     vehicle_title = "Emergency Vehicle"
 
-    if custom_label and any(k in custom_label.upper() for k in EMERGENCY_KEYWORDS):
+    if is_emergency_match(custom_label):
         is_emergency = True
         vehicle_title = custom_label.upper()
 
-    if plate_text:
-        upper_plate = plate_text.upper()
-        if any(k in upper_plate for k in EMERGENCY_KEYWORDS):
-            is_emergency = True
-            vehicle_title = f"Emergency Vehicle ({plate_text})"
+    if is_emergency_match(plate_text):
+        is_emergency = True
+        vehicle_title = f"Emergency Vehicle ({plate_text})"
 
     # If flagged as emergency
     if is_emergency:
@@ -75,7 +89,7 @@ def check_emergency_vehicle(
                         "track_id": track_id,
                         "speed_kmh": None,
                         "camera_id": camera_id,
-                        "status": "active",
+                        "status": "new",
                         "plate_text": plate_text,
                         "timestamp": alert.timestamp.isoformat(),
                         "green_corridor": True,
@@ -83,8 +97,9 @@ def check_emergency_vehicle(
                     try:
                         loop = asyncio.get_running_loop()
                     except RuntimeError:
-                        loop = asyncio.get_event_loop()
-                    asyncio.run_coroutine_threadsafe(broadcast(payload), loop)
+                        loop = None
+                    if loop and loop.is_running():
+                        asyncio.run_coroutine_threadsafe(broadcast(payload), loop)
                 except Exception as e:
                     print(f"[WebSocket Broadcast Failed] {e}")
             finally:

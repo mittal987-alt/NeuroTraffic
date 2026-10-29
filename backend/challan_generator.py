@@ -3,16 +3,17 @@ TrafficVision AI - E-Challan PDF Generator
 ------------------------------------------------
 Generates official digital traffic violation receipts (E-Challan)
 using ReportLab with fine breakdown, camera location, violation type,
-recorded speed, plate number, and payment verification.
+recorded speed, plate number, photographic evidence, and payment verification.
 """
 
 import io
-from datetime import datetime
+import os
+from datetime import datetime, timezone
 from reportlab.lib.pagesizes import letter
 from reportlab.lib import colors
 from reportlab.lib.units import inch
 from reportlab.platypus import (
-    SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, HRFlowable
+    SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, HRFlowable, Image
 )
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 
@@ -44,7 +45,6 @@ def generate_challan_pdf(alert_dict: dict) -> io.BytesIO:
 
     styles = getSampleStyleSheet()
 
-    # Custom styles
     title_style = ParagraphStyle(
         "ChallanTitle",
         parent=styles["Heading1"],
@@ -99,7 +99,8 @@ def generate_challan_pdf(alert_dict: dict) -> io.BytesIO:
 
     # Alert info resolution
     alert_id = alert_dict.get("id", 1001)
-    challan_no = f"TRF-CH-{datetime.utcnow().strftime('%Y%m')}-{alert_id:05d}"
+    now_dt = datetime.now(timezone.utc)
+    challan_no = f"TRF-CH-{now_dt.strftime('%Y%m')}-{alert_id:05d}"
     alert_type = alert_dict.get("alert_type", "overspeed").lower()
     violation_meta = VIOLATION_FINES.get(alert_type, {
         "title": alert_dict.get("alert_type", "Traffic Violation").replace("_", " ").title(),
@@ -107,7 +108,7 @@ def generate_challan_pdf(alert_dict: dict) -> io.BytesIO:
         "section": "Motor Vehicles Enforcement Act",
     })
 
-    timestamp_str = alert_dict.get("timestamp", datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"))
+    timestamp_str = alert_dict.get("timestamp", now_dt.strftime("%Y-%m-%d %H:%M:%S"))
     plate_text = alert_dict.get("plate_text") or "NOT CAPTURED / UNREGISTERED"
     camera_id = alert_dict.get("camera_id", "camera_1")
     speed_kmh = alert_dict.get("speed_kmh")
@@ -127,7 +128,7 @@ def generate_challan_pdf(alert_dict: dict) -> io.BytesIO:
             Paragraph(f"{camera_id.upper()} (Smart Sector)", body_style),
             Paragraph("<b>Status:</b>", body_style),
             Paragraph(
-                f"<font color='{'#38A169' if alert_dict.get('status') == 'resolved' else '#E53E3E'}'><b>{alert_dict.get('status', 'PENDING').upper()}</b></font>",
+                f"<font color='{'#38A169' if alert_dict.get('status') in ('reviewed', 'challan_issued') else '#E53E3E'}'><b>{alert_dict.get('status', 'PENDING').upper()}</b></font>",
                 body_style,
             ),
         ],
@@ -164,6 +165,17 @@ def generate_challan_pdf(alert_dict: dict) -> io.BytesIO:
     ]))
     story.append(details_table)
     story.append(Spacer(1, 15))
+
+    # Photo Evidence Section
+    evidence_path = alert_dict.get("evidence_path")
+    if evidence_path and os.path.exists(evidence_path):
+        story.append(Paragraph("EVIDENTIARY PHOTO CAPTURE", section_heading))
+        story.append(Spacer(1, 6))
+        try:
+            story.append(Image(evidence_path, width=3.2 * inch, height=2.4 * inch))
+            story.append(Spacer(1, 12))
+        except Exception as e:
+            print(f"[Challan PDF Image Error] {e}")
 
     # Fine Amount Breakdown
     story.append(Paragraph("PENALTY ASSESSMENT", section_heading))

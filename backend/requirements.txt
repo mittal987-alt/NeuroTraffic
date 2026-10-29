@@ -10,20 +10,17 @@ email-validator>=2.1.0
 # Database & ORM
 SQLAlchemy>=2.0.0
 psycopg2-binary>=2.9.9
-asyncpg>=0.29.0
-alembic>=1.13.0
 
 # Security & Auth
 passlib[bcrypt]>=1.7.4
 bcrypt>=4.0.1
 python-jose[cryptography]>=3.3.0
-PyJWT>=2.8.0
 
 # Computer Vision & AI Models
 opencv-python>=4.9.0
 ultralytics>=8.1.0
-torch
-torchvision
+torch==2.3.1
+torchvision==0.18.1
 easyocr>=1.7.1
 supervision>=0.20.0
 lap>=0.5.12

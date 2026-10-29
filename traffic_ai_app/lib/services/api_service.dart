@@ -1,17 +1,9 @@
 // lib/services/api_service.dart
 //
-// Handles all HTTP calls to the FastAPI backend.
-//
-// IMPORTANT - base URL depends on where you're running the app:
-//   - Android emulator: 10.0.2.2 (special alias for your PC's localhost)
-//   - iOS simulator: 127.0.0.1 works directly
-//   - Physical phone: use your PC's actual LAN IP, e.g. 192.168.1.42
-//     (find it with `ipconfig` on Windows, must be on the same WiFi network)
+// Handles all HTTP calls to the FastAPI backend with token authentication.
 
 import 'dart:convert';
-import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
-import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
 import 'auth_service.dart';
 import 'app_config.dart';
@@ -100,7 +92,7 @@ class AlertItem {
     required this.status,
     required this.resolutionNotes,
     required this.resolvedById,
-    required this.plateText,
+    this.plateText,
     required this.timestamp,
   });
 
@@ -133,7 +125,8 @@ class ApiService {
   }
 
   Future<List<VehicleEvent>> fetchRecentEvents({int limit = 50}) async {
-    final response = await http.get(Uri.parse('$baseUrl/events?limit=$limit'));
+    final headers = await _authHeaders();
+    final response = await http.get(Uri.parse('$baseUrl/events?limit=$limit'), headers: headers);
 
     if (response.statusCode == 200) {
       final List<dynamic> data = jsonDecode(response.body);
@@ -144,7 +137,8 @@ class ApiService {
   }
 
   Future<List<Map<String, dynamic>>> fetchHourlyTraffic({int hoursBack = 24}) async {
-    final response = await http.get(Uri.parse('$baseUrl/analytics/hourly?hours_back=$hoursBack'));
+    final headers = await _authHeaders();
+    final response = await http.get(Uri.parse('$baseUrl/analytics/hourly?hours_back=$hoursBack'), headers: headers);
     if (response.statusCode == 200) {
       return List<Map<String, dynamic>>.from(jsonDecode(response.body));
     }
@@ -152,7 +146,8 @@ class ApiService {
   }
 
   Future<List<Map<String, dynamic>>> fetchAlertBreakdown() async {
-    final response = await http.get(Uri.parse('$baseUrl/analytics/alerts'));
+    final headers = await _authHeaders();
+    final response = await http.get(Uri.parse('$baseUrl/analytics/alerts'), headers: headers);
     if (response.statusCode == 200) {
       return List<Map<String, dynamic>>.from(jsonDecode(response.body));
     }
@@ -160,7 +155,8 @@ class ApiService {
   }
 
   Future<List<TrafficCamera>> fetchCameras() async {
-    final response = await http.get(Uri.parse('$baseUrl/cameras'));
+    final headers = await _authHeaders();
+    final response = await http.get(Uri.parse('$baseUrl/cameras'), headers: headers);
     if (response.statusCode == 200) {
       final List<dynamic> data = jsonDecode(response.body);
       return data.map((json) => TrafficCamera.fromJson(json)).toList();
@@ -169,7 +165,8 @@ class ApiService {
   }
 
   Future<List<Map<String, dynamic>>> fetchVehicleTypeBreakdown() async {
-    final response = await http.get(Uri.parse('$baseUrl/analytics/vehicle_types'));
+    final headers = await _authHeaders();
+    final response = await http.get(Uri.parse('$baseUrl/analytics/vehicle_types'), headers: headers);
     if (response.statusCode == 200) {
       return List<Map<String, dynamic>>.from(jsonDecode(response.body));
     }
@@ -187,12 +184,12 @@ class ApiService {
     throw Exception('Failed to load alerts (status ${response.statusCode})');
   }
 
-  Future<void> resolveAlert(int alertId, {String? resolutionNotes}) async {
+  Future<void> resolveAlert(int alertId, {String? resolutionNotes, String? status}) async {
     final headers = await _authHeaders();
     final response = await http.post(
       Uri.parse('$baseUrl/alerts/$alertId/resolve'),
       headers: headers,
-      body: jsonEncode({'resolution_notes': resolutionNotes}),
+      body: jsonEncode({'resolution_notes': resolutionNotes, 'status': status ?? 'reviewed'}),
     );
     if (response.statusCode != 200) {
       throw Exception('Failed to resolve alert (status ${response.statusCode})');
@@ -211,7 +208,8 @@ class ApiService {
   }
 
   Future<Map<String, int>> fetchSummaryStats() async {
-    final response = await http.get(Uri.parse('$baseUrl/stats/summary'));
+    final headers = await _authHeaders();
+    final response = await http.get(Uri.parse('$baseUrl/stats/summary'), headers: headers);
 
     if (response.statusCode == 200) {
       final Map<String, dynamic> data = jsonDecode(response.body);
@@ -222,13 +220,24 @@ class ApiService {
   }
 
   String getChallanUrl(int alertId) => '$baseUrl/alerts/$alertId/challan';
+
+  Future<String> getAuthenticatedChallanUrl(int alertId) async {
+    final token = await _authService.getToken();
+    return token != null
+        ? '$baseUrl/alerts/$alertId/challan?token=$token'
+        : '$baseUrl/alerts/$alertId/challan';
+  }
+
   String getExportAlertsCsvUrl({String? status}) =>
       status != null ? '$baseUrl/export/alerts.csv?status=$status' : '$baseUrl/export/alerts.csv';
+
   String getExportEventsCsvUrl() => '$baseUrl/export/events.csv';
 
   Future<Map<String, dynamic>> triggerGreenCorridor(String cameraId, {int durationSec = 25}) async {
+    final headers = await _authHeaders();
     final response = await http.post(
       Uri.parse('$baseUrl/signals/$cameraId/green_corridor?duration_sec=$durationSec'),
+      headers: headers,
     );
     if (response.statusCode == 200) {
       return jsonDecode(response.body);

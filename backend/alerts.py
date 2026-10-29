@@ -9,12 +9,19 @@ across all of them.
 """
 
 import asyncio
+import os
+import uuid
 from datetime import datetime
+
+import cv2
 
 from database import Alert, PlateRead, SessionLocal
 from push_notifications import send_push_notification
 from websocket_manager import broadcast
 from config import TEST_DEVICE_TOKEN
+
+VIOLATIONS_DIR = "violations"
+os.makedirs(VIOLATIONS_DIR, exist_ok=True)
 
 # Prevents sending a push every single frame a vehicle triggers a
 # condition -- once per (alert_type, track_id) is enough.
@@ -43,6 +50,31 @@ _ALERT_TITLES = {
 }
 
 
+def _save_evidence_crop(frame, box) -> str | None:
+    """Extracts a clean crop of the violating vehicle and saves to violations/."""
+    try:
+        if frame is None or box is None:
+            return None
+        if hasattr(box, "xyxy"):
+            x1, y1, x2, y2 = map(int, box.xyxy[0])
+        elif isinstance(box, (tuple, list)) and len(box) == 4:
+            x1, y1, x2, y2 = map(int, box)
+        else:
+            return None
+
+        h, w = frame.shape[:2]
+        crop = frame[max(y1, 0):min(y2, h), max(x1, 0):min(x2, w)]
+        if crop is None or crop.size == 0:
+            return None
+
+        filename = f"{VIOLATIONS_DIR}/{uuid.uuid4().hex}.jpg"
+        cv2.imwrite(filename, crop)
+        return filename
+    except Exception as e:
+        print(f"[Evidence Crop Failed] {e}")
+        return None
+
+
 def log_alert(
     db,
     alert_type: str,
@@ -51,6 +83,7 @@ def log_alert(
     track_id: int | None = None,
     speed_kmh: float | None = None,
     plate_text: str | None = None,
+    evidence_path: str | None = None,
 ) -> Alert:
     """
     Creates and commits an Alert record to the database and sends a push notification.
@@ -61,6 +94,8 @@ def log_alert(
         track_id=track_id,
         camera_id=camera_id,
         speed_kmh=speed_kmh,
+        evidence_path=evidence_path,
+        status="new",
     )
     db.add(alert)
     db.commit()
@@ -75,7 +110,16 @@ def log_alert(
     return alert
 
 
-def save_and_push_alert(alert_type: str, camera_id: str, track_id: int, message_text: str, speed_kmh: float | None = None):
+def save_and_push_alert(
+    alert_type: str,
+    camera_id: str,
+    track_id: int,
+    message_text: str,
+    speed_kmh: float | None = None,
+    frame=None,
+    box=None,
+    evidence_path: str | None = None,
+):
     """
     Saves an Alert row to the database and sends a push notification.
     Uses track_id for vehicle deduplication, but allows multiple alerts
@@ -93,6 +137,10 @@ def save_and_push_alert(alert_type: str, camera_id: str, track_id: int, message_
             return
         seen.add(key)
 
+    # Save evidence photo if available and not yet saved
+    if evidence_path is None and frame is not None and box is not None:
+        evidence_path = _save_evidence_crop(frame, box)
+
     db = SessionLocal()
     try:
         alert = Alert(
@@ -101,6 +149,8 @@ def save_and_push_alert(alert_type: str, camera_id: str, track_id: int, message_
             track_id=track_id,
             camera_id=camera_id,
             speed_kmh=speed_kmh,
+            evidence_path=evidence_path,
+            status="new",
         )
         db.add(alert)
         db.commit()
@@ -124,29 +174,28 @@ def save_and_push_alert(alert_type: str, camera_id: str, track_id: int, message_
 
         # Broadcast the alert to Flutter app via WebSocket
         try:
-            # Try to get the event loop. If we're in a worker thread (which we usually are
-            # during detection), we need to handle it safely.
             try:
                 loop = asyncio.get_running_loop()
             except RuntimeError:
-                # Fallback to finding any available loop or using the event loop policy
-                loop = asyncio.get_event_loop()
+                loop = None
 
-            asyncio.run_coroutine_threadsafe(
-                broadcast({
-                    "type": "alert",
-                    "id": alert.id,
-                    "alert_type": alert.alert_type,
-                    "message": alert.message,
-                    "track_id": alert.track_id,
-                    "camera_id": alert.camera_id,
-                    "speed_kmh": alert.speed_kmh,
-                    "status": alert.status,
-                    "plate_text": plate_text,
-                    "timestamp": alert.timestamp.isoformat(),
-                }),
-                loop
-            )
+            if loop and loop.is_running():
+                asyncio.run_coroutine_threadsafe(
+                    broadcast({
+                        "type": "alert",
+                        "id": alert.id,
+                        "alert_type": alert.alert_type,
+                        "message": alert.message,
+                        "track_id": alert.track_id,
+                        "camera_id": alert.camera_id,
+                        "speed_kmh": alert.speed_kmh,
+                        "status": alert.status,
+                        "plate_text": plate_text,
+                        "evidence_path": alert.evidence_path,
+                        "timestamp": alert.timestamp.isoformat(),
+                    }),
+                    loop
+                )
         except Exception as e:
             print(f"[WebSocket Broadcast Failed] {e}")
     finally:

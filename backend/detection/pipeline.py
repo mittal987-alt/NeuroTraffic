@@ -29,7 +29,9 @@ PERFORMANCE NOTES (read this if the live feed feels laggy):
 
 import asyncio
 from collections import defaultdict, deque
-from datetime import datetime
+from datetime import datetime, timezone
+import time
+import numpy as np
 
 import cv2
 from ultralytics import YOLO
@@ -109,7 +111,7 @@ def update_camera_heartbeat(camera_id: str):
     try:
         camera = db.query(Camera).filter(Camera.id == camera_id).first()
         if camera:
-            camera.last_seen = datetime.utcnow()
+            camera.last_seen = datetime.now(timezone.utc)
             camera.status = "online"
             db.commit()
     finally:
@@ -191,7 +193,28 @@ async def run_camera_pipeline(camera_id: str, source_type: str, video_path: str)
 
     if not cap.isOpened():
         print(f"ERROR [{camera_id}]: Neither primary nor fallback source could be opened")
+        db = SessionLocal()
+        try:
+            cam = db.query(Camera).filter(Camera.id == camera_id).first()
+            if cam:
+                cam.status = "offline"
+                cam.last_seen = datetime.now(timezone.utc)
+                db.commit()
+        finally:
+            db.close()
         return
+
+    # Check for optional camera calibration points for homography
+    homography_matrix = None
+    cam_cfg = next((c for c in CAMERA_SOURCES if c.get("id") == camera_id), None)
+    if cam_cfg and "calibration_points" in cam_cfg:
+        try:
+            calib = cam_cfg["calibration_points"]
+            img_pts = np.float32(calib["image_points"])
+            world_pts = np.float32(calib["world_points"])
+            homography_matrix = cv2.getPerspectiveTransform(img_pts, world_pts)
+        except Exception as e:
+            print(f"[{camera_id}] Homography calculation failed: {e}")
 
     fps = cap.get(cv2.CAP_PROP_FPS) or 30
     position_history = defaultdict(lambda: deque(maxlen=HISTORY_LENGTH))
@@ -274,7 +297,8 @@ async def run_camera_pipeline(camera_id: str, source_type: str, video_path: str)
                         x1, y1, x2, y2 = int(x1 / scale), int(y1 / scale), int(x2 / scale), int(y2 / scale)
                     cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
 
-                    position_history[track_id].append((frame_count, cx, cy))
+                    t_now = time.monotonic()
+                    position_history[track_id].append((t_now, cx, cy))
 
                     # --- Line-crossing count + red-light check ---
                     side = "above" if cy < LINE_Y else "below"
@@ -283,24 +307,24 @@ async def run_camera_pipeline(camera_id: str, source_type: str, video_path: str)
                             counted_ids.add(track_id)
                             class_counts[label] += 1
                             save_crossing_event(camera_id, track_id, label, latest_speed_kmh.get(track_id))
-                            check_red_light_violation(camera_id, track_id, label)
+                            check_red_light_violation(camera_id, track_id, label, frame=frame, box=box)
                     last_side_of_line[track_id] = side
 
                     # --- Speed + overspeed alert ---
                     history = position_history[track_id]
-                    speed_kmh = calculate_speed_kmh(history, fps)
+                    speed_kmh = calculate_speed_kmh(history, fps, homography_matrix=homography_matrix)
                     if speed_kmh is not None:
                         latest_speed_kmh[track_id] = speed_kmh
-                        check_overspeed(camera_id, track_id, label, speed_kmh)
+                        check_overspeed(camera_id, track_id, label, speed_kmh, frame=frame, box=box)
                         record_speed(camera_id, track_id, speed_kmh)
 
                     # --- Wrong-way check ---
-                    check_wrong_way(camera_id, track_id, label, history)
+                    check_wrong_way(camera_id, track_id, label, history, frame=frame, box=box)
 
                     # --- Lane departure check (skipped until we have at
                     # least one cached set of lane polygons) ---
                     if lane_polygons is not None:
-                        check_lane_departure(camera_id, track_id, label, cx, cy, lane_polygons)
+                        check_lane_departure(camera_id, track_id, label, cx, cy, lane_polygons, frame=frame, box=box)
 
                     # --- Type-specific checks (backgrounded, non-blocking) ---
                     if label == "motorcycle":

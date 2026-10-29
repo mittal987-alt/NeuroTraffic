@@ -194,26 +194,42 @@ NeuroTraffic/
    ```
 
 4. **Configure Environment Variables:**
-   Create a `.env` file in the `backend/` folder:
+   Create a `.env` file in the `backend/` folder (or copy `.env.example`):
    ```env
    # Database (Defaults to SQLite if omitted)
    DATABASE_URL=sqlite:///./traffic.db
 
-   # Security
+   # Security & Roles
    JWT_SECRET_KEY=your-super-secret-jwt-key-here
+   ADMIN_EMAILS=admin@trafficvision.ai
 
-   # Camera Input (0 for local webcam, or IP Webcam URL, or video path)
-   CAMERA_1_VIDEO_PATH=0
+   # Signal Mode: "simulated" | "manual" | "api"
+   SIGNAL_MODE=simulated
+   SIGNAL_API_URL=
 
-   # Firebase (Optional: for push notifications)
-   FIREBASE_SERVICE_ACCOUNT_PATH=firebase-service-account.json
-   FCM_DEVICE_TOKEN=PASTE_YOUR_FCM_TOKEN_HERE
+   # Privacy & Retention
+   ENABLE_FACE_CAPTURE=false
+   FACE_RETENTION_DAYS=7
+
+   # False-Positive Reduction
+   CONSECUTIVE_VIOLATION_CHECKS=3
+
+   # Camera Input
+   CAMERA_1_VIDEO_PATH=traffic.mp4
 
    # Detection Calibration
    CONF_THRESHOLD=0.4
    SPEED_LIMIT_KMH=80.0
    PIXELS_PER_METER=8.0
    DETECTION_FRAME_SKIP=4
+   WHOLE_FRAME_CHECK_INTERVAL=30
+   JPEG_QUALITY=60
+   DETECTION_RESIZE_WIDTH=640
+
+   # External Cloud & Notification Services
+   FIREBASE_SERVICE_ACCOUNT_PATH=firebase-service-account.json
+   FCM_DEVICE_TOKEN=PASTE_YOUR_FCM_TOKEN_HERE
+   ROBOFLOW_API_KEY=your-roboflow-api-key
    ```
 
 5. **Run the Backend Server:**
@@ -256,26 +272,60 @@ Key tunable options in [backend/config.py](file:///c:/projects/traffic_ai/backen
 
 | Variable | Default | Purpose |
 | :--- | :--- | :--- |
-| `CAMERA_1_VIDEO_PATH` | `0` / URL | Input stream source (`0` for USB camera, RTSP/HTTP URL, or file path). |
+| `CAMERA_SOURCES` | `camera_1` | Configured camera entries (ID, video path, and optional `calibration_points` homography). |
+| `SIGNAL_MODE` | `"simulated"` | Traffic light cycle controller: `"simulated"`, `"manual"`, or `"api"`. |
+| `SIGNAL_API_URL` | `""` | External HTTP endpoint polled (1s cache, safe green fallback) when `SIGNAL_MODE="api"`. |
+| `ENABLE_FACE_CAPTURE` | `False` | Opt-in toggle for capturing driver face crops (disabled by default for privacy). |
+| `FACE_RETENTION_DAYS` | `7` | Purge threshold in days for automated face crops and audit log cleanup. |
+| `CONSECUTIVE_VIOLATION_CHECKS` | `3` | Number of consecutive detections required before raising a violation alert. |
 | `CONF_THRESHOLD` | `0.4` | Minimum confidence score for YOLO object detection. |
 | `DETECTION_FRAME_SKIP` | `4` | Runs YOLO every N frames on CPU to ensure high-FPS video streaming. |
 | `SPEED_LIMIT_KMH` | `80.0` | Threshold in km/h above which an overspeed alert is triggered. |
-| `PIXELS_PER_METER` | `8.0` | Camera calibration constant converting pixel shifts to real-world meters. |
+| `PIXELS_PER_METER` | `8.0` | Fallback calibration constant converting pixel shifts to meters when homography is absent. |
 | `JPEG_QUALITY` | `60` | MJPEG streaming compression quality (1–100). |
 
 ---
 
 ## 📡 Core API & Streaming Endpoints
 
-| Method | Endpoint | Description |
-| :--- | :--- | :--- |
-| `POST` | `/auth/signup` | Registers a new operator/admin account. |
-| `POST` | `/auth/login` | Authenticates credentials and returns a JWT bearer token. |
-| `GET` | `/video_feed/{camera_id}` | Live MJPEG video stream with bounding boxes and overlays. |
-| `GET` | `/alerts` | Fetches historical violations with filtering options. |
-| `GET` | `/challan/{alert_id}` | Downloads an evidence-backed official E-Challan PDF. |
-| `GET` | `/analytics/summary` | Aggregated traffic flow, vehicle counts, and violation metrics. |
-| `WS` | `/ws/live` | WebSocket endpoint streaming instant alerts and signal states. |
+| Method | Endpoint | Auth Required | Description |
+| :--- | :--- | :--- | :--- |
+| `GET` | `/` | Public | System health check and status. |
+| `POST` | `/auth/signup` | Public | Registers a new account (first user / whitelisted emails get admin role). |
+| `POST` | `/auth/login` | Public | Authenticates credentials with rate limiting (5 failed attempts per email+IP / 15 min). |
+| `GET` | `/auth/me` | Bearer Token | Fetches current user profile and role verification. |
+| `GET` | `/events` | Bearer Token | Fetches counting line vehicle crossing events with plate lookups. |
+| `GET` | `/alerts` | Bearer Token | Fetches violation alerts with optional status filtering. |
+| `POST` | `/alerts/{id}/resolve` | Bearer Token | Updates alert review status (`new` -> `reviewed` -> `dismissed`/`challan_issued`). |
+| `GET` | `/alerts/{id}/challan` | Bearer / `?token=` | Generates and streams PDF E-Challan (requires `reviewed` status). |
+| `GET` | `/plates` | Bearer Token | Fetches recent ANPR plate read records. |
+| `GET` | `/potholes` | Bearer Token | Fetches detected road potholes and surface hazards. |
+| `GET` | `/cameras` | Bearer Token | Returns camera configurations, GPS coordinates, and online status. |
+| `GET` | `/density` | Bearer Token | Real-time traffic density snapshot per camera. |
+| `GET` | `/analytics/*` | Bearer Token | Hourly traffic, alert breakdown, and vehicle type breakdown. |
+| `GET` | `/stats/summary` | Bearer Token | High-level traffic counts categorized by vehicle type. |
+| `GET` | `/stream/{camera_id}` | Bearer / `?token=` | Live MJPEG video stream with bounding boxes and overlays. |
+| `WS` | `/ws/live` | `?token=` Query | Live WebSocket feed streaming telemetry and real-time alerts. |
+| `POST` | `/signals/{id}/green_corridor` | **Admin Only** | Triggers emergency Green Corridor preemption holding signal green. |
+| `POST` | `/signals/{id}/state` | **Admin Only** | Sets manual signal state (`red` or `green`) when `SIGNAL_MODE="manual"`. |
+| `GET` | `/signals/{id}` | Bearer Token | Fetches real-time signal phase and active corridor status. |
+| `GET` | `/logs` | **Admin Only** | Audit trail of all detections including plates, speeds, and face paths. |
+| `GET` | `/export/alerts.csv` | **Admin Only** | Exports violation alert records to a downloadable CSV spreadsheet. |
+| `GET` | `/export/events.csv` | **Admin Only** | Exports vehicle tracking and counting logs to a CSV spreadsheet. |
+
+---
+
+## 🔒 Data & Privacy
+
+NeuroTraffic is engineered with privacy-by-design principles and adheres to the **Digital Personal Data Protection (DPDP) Act**:
+
+- **Data Minimization & Storage**: By default, only municipal vehicle telemetry (class, speeds, timestamps, counting line crossings) and license plates (for verified infractions) are stored. Vehicle crops are stored strictly as evidence snapshots for confirmed infractions.
+- **Opt-In Driver Face Capture**: Facial detection and cropping in `captured_faces/` is strictly opt-in and disabled by default (`ENABLE_FACE_CAPTURE=false`).
+- **Automated Data Retention & Purging**: An automated retention lifecycle scheduler runs on backend startup and every 6 hours thereafter, permanently deleting face crops from disk and purging `detection_logs` rows older than `FACE_RETENTION_DAYS` (default 7 days).
+- **Third-Party Processing Disclosure**: Inference for helmet, seatbelt, and lane detection utilizes the Roboflow Hosted Inference API. Vehicle crops containing cockpit or helmet areas are transmitted over TLS to Roboflow servers strictly for model evaluation.
+- **Human-in-the-Loop Governance**: E-Challan generation strictly mandates a `new` -> `reviewed` workflow, preventing automated issuance without human verification.
+
+---
 
 ---
 
