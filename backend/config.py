@@ -25,9 +25,21 @@ SIGNAL_API_URL = os.getenv("SIGNAL_API_URL", "")
 # Privacy & Data Retention
 ENABLE_FACE_CAPTURE = os.getenv("ENABLE_FACE_CAPTURE", "false").lower() in ("true", "1", "yes")
 FACE_RETENTION_DAYS = int(os.getenv("FACE_RETENTION_DAYS", "7"))
+EVIDENCE_RETENTION_DAYS = int(os.getenv("EVIDENCE_RETENTION_DAYS", "30"))
+EVIDENCE_RETENTION_CHALLAN_DAYS = int(os.getenv("EVIDENCE_RETENTION_CHALLAN_DAYS", "180"))
+
+# CORS allowed origins (comma-separated). Default "*" means all, which
+# sets allow_credentials=False automatically for security.
+ALLOWED_ORIGINS = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "*").split(",") if o.strip()]
 
 # False-positive reduction: consecutive confirmation count
 CONSECUTIVE_VIOLATION_CHECKS = int(os.getenv("CONSECUTIVE_VIOLATION_CHECKS", "3"))
+
+# Helmet/Seatbelt confirmation: minimum seconds between API check attempts per track
+CONFIRM_INTERVAL_SEC = float(os.getenv("CONFIRM_INTERVAL_SEC", "1.0"))
+
+# Maximum number of API attempts per track_id before giving up
+MAX_API_ATTEMPTS = int(os.getenv("MAX_API_ATTEMPTS", "8"))
 
 # Each entry is one "camera" -- it now pulls paths from your .env file
 # Entries may also contain optional "calibration_points" with "image_points" and "world_points"
@@ -40,8 +52,7 @@ CAMERA_SOURCES = [
     },
 ]
 
-# JWT Secret Key from .env
-JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", "insecure-dev-key-change-me")
+# JWT_SECRET_KEY is managed in auth.py (generates a secure random key if unset)
 
 
 # --- Vehicle classes (COCO class IDs -> readable labels) ---

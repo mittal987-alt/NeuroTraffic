@@ -38,7 +38,20 @@ from auth import (
 )
 from challan_generator import generate_challan_pdf
 from signal_state import trigger_green_corridor, get_signal_info, set_manual_signal_state
-from config import ADMIN_EMAILS
+from config import ADMIN_EMAILS, ALLOWED_ORIGINS
+
+# Valid statuses a reviewer may transition to via POST /alerts/{id}/resolve
+ALLOWED_STATUSES = {"new", "reviewed", "dismissed", "challan_issued"}
+REVIEW_STATUSES = {"reviewed", "dismissed"}  # only these are accepted via /resolve
+
+# Reviewer role: admin or reviewer
+def get_reviewer_user(current_user: User = Depends(get_current_user)) -> User:
+    if current_user.role not in ("admin", "reviewer"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Requires 'reviewer' or 'admin' role"
+        )
+    return current_user
 
 
 class SignupRequest(BaseModel):
@@ -94,11 +107,13 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="TrafficVision AI Backend", lifespan=lifespan)
 
-# Enable CORS so the Flutter app can connect from any device/browser
+# Enable CORS. allow_credentials=True only when specific origins are provided;
+# with wildcard '*', browsers reject credential requests.
+_cors_wildcard = "*" in ALLOWED_ORIGINS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=ALLOWED_ORIGINS,
+    allow_credentials=not _cors_wildcard,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -124,9 +139,8 @@ def signup(payload: SignupRequest, db: Session = Depends(get_db_session)):
         print(f"[signup] Password hashing failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-    # First registered user is automatically an admin, or if email in ADMIN_EMAILS
-    is_first_user = db.query(User).count() == 0
-    is_admin = is_first_user or (payload.email.lower() in ADMIN_EMAILS)
+    # Admin only if email is in ADMIN_EMAILS whitelist
+    is_admin = payload.email.lower() in ADMIN_EMAILS
     role = "admin" if is_admin else "viewer"
 
     user = User(email=payload.email, name=payload.name, password_hash=password_hash, role=role)
@@ -276,14 +290,21 @@ def get_alerts(
 def resolve_alert(
     alert_id: int,
     payload: ResolveAlertRequest,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_reviewer_user),
     db: Session = Depends(get_db_session),
 ):
     alert = db.query(Alert).filter(Alert.id == alert_id).first()
     if not alert:
         raise HTTPException(status_code=404, detail="Alert not found")
 
-    alert.status = payload.status or "reviewed"
+    new_status = payload.status or "reviewed"
+    if new_status not in REVIEW_STATUSES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Status must be one of {sorted(REVIEW_STATUSES)}"
+        )
+
+    alert.status = new_status
     if payload.resolution_notes is not None:
         alert.resolution_notes = payload.resolution_notes
     alert.resolved_by_id = current_user.id
@@ -303,7 +324,7 @@ def download_challan_pdf(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db_session),
 ):
-    """Generates and downloads a digital PDF E-Challan for a reviewed violation alert."""
+    """Read-only: returns the challan PDF if already issued. Does NOT change alert status."""
     alert = db.query(Alert).filter(Alert.id == alert_id).first()
     if not alert:
         raise HTTPException(status_code=404, detail="Violation alert not found")
@@ -349,16 +370,46 @@ def download_challan_pdf(
 
     pdf_buffer = generate_challan_pdf(alert_dict)
 
-    # Update alert status flow to challan_issued
-    alert.status = "challan_issued"
-    db.commit()
-
+    # READ-ONLY: do NOT update alert.status here
     filename = f"echallan_notice_{alert.id}.pdf"
     return StreamingResponse(
         pdf_buffer,
         media_type="application/pdf",
         headers={"Content-Disposition": f"inline; filename={filename}"},
     )
+
+
+@app.post("/alerts/{alert_id}/challan/issue")
+def issue_challan(
+    alert_id: int,
+    admin_user: User = Depends(get_admin_user),
+    db: Session = Depends(get_db_session),
+):
+    """Admin only: issues challan by setting status to 'challan_issued'. Returns PDF URL."""
+    alert = db.query(Alert).filter(Alert.id == alert_id).first()
+    if not alert:
+        raise HTTPException(status_code=404, detail="Alert not found")
+
+    if alert.alert_type in ("pothole", "emergency_vehicle"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot issue challan for non-violation alert type: {alert.alert_type}",
+        )
+
+    if alert.status != "reviewed":
+        raise HTTPException(
+            status_code=422,
+            detail=f"Challan can only be issued for alerts in 'reviewed' status (current: '{alert.status}')",
+        )
+
+    alert.status = "challan_issued"
+    db.commit()
+    db.refresh(alert)
+    return {
+        "id": alert.id,
+        "status": alert.status,
+        "challan_url": f"/alerts/{alert_id}/challan",
+    }
 
 
 @app.get("/export/alerts.csv")

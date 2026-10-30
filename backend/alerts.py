@@ -23,6 +23,13 @@ from config import TEST_DEVICE_TOKEN
 VIOLATIONS_DIR = "violations"
 os.makedirs(VIOLATIONS_DIR, exist_ok=True)
 
+_main_loop: asyncio.AbstractEventLoop | None = None
+
+
+def set_main_loop(loop: asyncio.AbstractEventLoop):
+    global _main_loop
+    _main_loop = loop
+
 # Prevents sending a push every single frame a vehicle triggers a
 # condition -- once per (alert_type, track_id) is enough.
 alerted_track_ids: dict[str, set[tuple[str, int]]] = {
@@ -68,7 +75,15 @@ def _save_evidence_crop(frame, box) -> str | None:
             return None
 
         filename = f"{VIOLATIONS_DIR}/{uuid.uuid4().hex}.jpg"
-        cv2.imwrite(filename, crop)
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+
+        if loop and loop.is_running():
+            loop.run_in_executor(None, cv2.imwrite, filename, crop)
+        else:
+            cv2.imwrite(filename, crop)
         return filename
     except Exception as e:
         print(f"[Evidence Crop Failed] {e}")
@@ -102,10 +117,23 @@ def log_alert(
     db.refresh(alert)
 
     title = _ALERT_TITLES.get(alert_type, "Alert")
-    if TEST_DEVICE_TOKEN != "PASTE_YOUR_FCM_TOKEN_HERE":
-        send_push_notification(TEST_DEVICE_TOKEN, title, f"[{camera_id}] {message}")
+    def _do_push_log():
+        if TEST_DEVICE_TOKEN != "PASTE_YOUR_FCM_TOKEN_HERE":
+            send_push_notification(TEST_DEVICE_TOKEN, title, f"[{camera_id}] {message}")
+        else:
+            print(f"Mock push sent successfully: Notification(title='{title}', body='[{camera_id}] {message}') to PASTE_YOUR_FCM_TOKEN_HERE")
+
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+
+    if loop and loop.is_running():
+        loop.run_in_executor(None, _do_push_log)
+    elif _main_loop and _main_loop.is_running():
+        _main_loop.run_in_executor(None, _do_push_log)
     else:
-        print(f"Mock push sent successfully: Notification(title='{title}', body='[{camera_id}] {message}') to PASTE_YOUR_FCM_TOKEN_HERE")
+        _do_push_log()
 
     return alert
 
@@ -179,30 +207,44 @@ def save_and_push_alert(
             except RuntimeError:
                 loop = None
 
+            payload = {
+                "type": "alert",
+                "id": alert.id,
+                "alert_type": alert.alert_type,
+                "message": alert.message,
+                "track_id": alert.track_id,
+                "camera_id": alert.camera_id,
+                "speed_kmh": alert.speed_kmh,
+                "status": alert.status,
+                "plate_text": plate_text,
+                "evidence_path": alert.evidence_path,
+                "timestamp": alert.timestamp.isoformat(),
+            }
+
             if loop and loop.is_running():
-                asyncio.run_coroutine_threadsafe(
-                    broadcast({
-                        "type": "alert",
-                        "id": alert.id,
-                        "alert_type": alert.alert_type,
-                        "message": alert.message,
-                        "track_id": alert.track_id,
-                        "camera_id": alert.camera_id,
-                        "speed_kmh": alert.speed_kmh,
-                        "status": alert.status,
-                        "plate_text": plate_text,
-                        "evidence_path": alert.evidence_path,
-                        "timestamp": alert.timestamp.isoformat(),
-                    }),
-                    loop
-                )
+                asyncio.run_coroutine_threadsafe(broadcast(payload), loop)
+            elif _main_loop and _main_loop.is_running():
+                asyncio.run_coroutine_threadsafe(broadcast(payload), _main_loop)
         except Exception as e:
             print(f"[WebSocket Broadcast Failed] {e}")
     finally:
         db.close()
 
-    title = _ALERT_TITLES.get(alert_type, "Alert")
-    if TEST_DEVICE_TOKEN != "PASTE_YOUR_FCM_TOKEN_HERE":
-        send_push_notification(TEST_DEVICE_TOKEN, title, f"[{camera_id}] {message_text}")
+    def _do_push():
+        title = _ALERT_TITLES.get(alert_type, "Alert")
+        if TEST_DEVICE_TOKEN != "PASTE_YOUR_FCM_TOKEN_HERE":
+            send_push_notification(TEST_DEVICE_TOKEN, title, f"[{camera_id}] {message_text}")
+        else:
+            print(f"Mock push sent successfully: Notification(title='{title}', body='[{camera_id}] {message_text}') to PASTE_YOUR_FCM_TOKEN_HERE")
+
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+
+    if loop and loop.is_running():
+        loop.run_in_executor(None, _do_push)
+    elif _main_loop and _main_loop.is_running():
+        _main_loop.run_in_executor(None, _do_push)
     else:
-        print(f"Mock push sent successfully: Notification(title='{title}', body='[{camera_id}] {message_text}') to PASTE_YOUR_FCM_TOKEN_HERE")
+        _do_push()

@@ -55,6 +55,7 @@ from detection.lane import get_current_lane_polygons, check_lane_departure
 from detection.accident import record_speed, check_accident, cleanup_old_tracks
 from detection.emergency import check_emergency_vehicle
 from signal_state import get_signal_state, is_green_corridor_active
+from alerts import set_main_loop
 
 try:
     from youtube_stream import get_direct_stream_url
@@ -67,6 +68,25 @@ except ImportError:
 latest_density_by_camera: dict[str, dict] = {}
 
 background_tasks = set()
+
+class FullFrameBox:
+    """Represents a bounding box in full-frame pixel coordinates."""
+    def __init__(self, x1: int, y1: int, x2: int, y2: int):
+        self.x1 = int(x1)
+        self.y1 = int(y1)
+        self.x2 = int(x2)
+        self.y2 = int(y2)
+        self.xyxy = [(self.x1, self.y1, self.x2, self.y2)]
+
+    def __iter__(self):
+        return iter((self.x1, self.y1, self.x2, self.y2))
+
+    def __getitem__(self, item):
+        return (self.x1, self.y1, self.x2, self.y2)[item]
+
+    def __repr__(self):
+        return f"FullFrameBox({self.x1}, {self.y1}, {self.x2}, {self.y2})"
+
 
 def fire_and_forget(coro):
     task = asyncio.create_task(coro)
@@ -178,6 +198,7 @@ async def run_camera_pipeline(camera_id: str, source_type: str, video_path: str)
     Runs detection for ONE camera. Each call gets its own YOLO model
     instance. If the primary source fails, it falls back to traffic.mp4.
     """
+    set_main_loop(asyncio.get_running_loop())
     model = YOLO("yolov8n.pt")
     is_fallback = False
 
@@ -273,13 +294,14 @@ async def run_camera_pipeline(camera_id: str, source_type: str, video_path: str)
         # each one is a network call to an external API and doesn't
         # need to run on every single frame to be useful. ---
         if run_whole_frame_checks:
-            last_lane_polygons = get_current_lane_polygons(camera_id, frame)
-            check_potholes(camera_id, frame)
+            last_lane_polygons = await asyncio.to_thread(get_current_lane_polygons, camera_id, frame.copy())
+            await asyncio.to_thread(check_potholes, camera_id, frame.copy())
         lane_polygons = last_lane_polygons
 
         vehicles_this_frame = last_vehicles_this_frame
 
         if run_full_detection:
+            clean_frame = frame.copy()
             detect_frame, scale = _resize_for_detection(frame)
             # model.track() is CPU-bound -- also offloaded to a thread
             # so it doesn't block WebSocket/API handling on the server
@@ -295,10 +317,18 @@ async def run_camera_pipeline(camera_id: str, source_type: str, video_path: str)
                     x1, y1, x2, y2 = map(int, box.xyxy[0])
                     if scale != 1.0:
                         x1, y1, x2, y2 = int(x1 / scale), int(y1 / scale), int(x2 / scale), int(y2 / scale)
+                    ff_box = FullFrameBox(x1, y1, x2, y2)
                     cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
+                    # Bottom-center (ground contact point) for homography accuracy
+                    gx, gy = cx, y2
 
-                    t_now = time.monotonic()
-                    position_history[track_id].append((t_now, cx, cy))
+                    # Timestamp: use real elapsed time for live streams,
+                    # frame-number-derived time for files (avoids drift from processing delay).
+                    if is_live_stream:
+                        t_now = time.monotonic()
+                    else:
+                        t_now = frame_count / fps
+                    position_history[track_id].append((t_now, gx, gy))
 
                     # --- Line-crossing count + red-light check ---
                     side = "above" if cy < LINE_Y else "below"
@@ -307,7 +337,7 @@ async def run_camera_pipeline(camera_id: str, source_type: str, video_path: str)
                             counted_ids.add(track_id)
                             class_counts[label] += 1
                             save_crossing_event(camera_id, track_id, label, latest_speed_kmh.get(track_id))
-                            check_red_light_violation(camera_id, track_id, label, frame=frame, box=box)
+                            check_red_light_violation(camera_id, track_id, label, frame=clean_frame, box=ff_box)
                     last_side_of_line[track_id] = side
 
                     # --- Speed + overspeed alert ---
@@ -315,28 +345,28 @@ async def run_camera_pipeline(camera_id: str, source_type: str, video_path: str)
                     speed_kmh = calculate_speed_kmh(history, fps, homography_matrix=homography_matrix)
                     if speed_kmh is not None:
                         latest_speed_kmh[track_id] = speed_kmh
-                        check_overspeed(camera_id, track_id, label, speed_kmh, frame=frame, box=box)
+                        check_overspeed(camera_id, track_id, label, speed_kmh, frame=clean_frame, box=ff_box)
                         record_speed(camera_id, track_id, speed_kmh)
 
                     # --- Wrong-way check ---
-                    check_wrong_way(camera_id, track_id, label, history, frame=frame, box=box)
+                    check_wrong_way(camera_id, track_id, label, history, frame=clean_frame, box=ff_box)
 
                     # --- Lane departure check (skipped until we have at
                     # least one cached set of lane polygons) ---
                     if lane_polygons is not None:
-                        check_lane_departure(camera_id, track_id, label, cx, cy, lane_polygons, frame=frame, box=box)
+                        check_lane_departure(camera_id, track_id, label, cx, cy, lane_polygons, frame=clean_frame, box=ff_box)
 
                     # --- Type-specific checks (backgrounded, non-blocking) ---
                     if label == "motorcycle":
-                        fire_and_forget(check_helmet_and_alert(camera_id, track_id, frame, box))
-                        fire_and_forget(check_plate_and_save(camera_id, track_id, frame, box))
+                        fire_and_forget(check_helmet_and_alert(camera_id, track_id, clean_frame, ff_box))
+                        fire_and_forget(check_plate_and_save(camera_id, track_id, clean_frame, ff_box))
                     elif label in ("car", "truck", "bus"):
-                        fire_and_forget(check_plate_and_save(camera_id, track_id, frame, box))
-                        fire_and_forget(check_seatbelt_and_alert(camera_id, track_id, label, frame, box))
+                        fire_and_forget(check_plate_and_save(camera_id, track_id, clean_frame, ff_box))
+                        fire_and_forget(check_seatbelt_and_alert(camera_id, track_id, label, clean_frame, ff_box))
 
                     # --- Full log: plate + speed + face, every occurrence (throttled) ---
                     fire_and_forget(
-                        log_full_detection(camera_id, track_id, frame_count, frame, box, latest_speed_kmh.get(track_id))
+                        log_full_detection(camera_id, track_id, frame_count, clean_frame, ff_box, latest_speed_kmh.get(track_id))
                     )
 
                     vehicles_this_frame.append(

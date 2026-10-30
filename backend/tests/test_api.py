@@ -24,10 +24,14 @@ import alerts
 # 1. Signup / Login & Rate Limiting Tests
 # ============================================================================
 
-def test_signup_and_first_user_admin(client, db_session):
+def test_signup_admin_email_whitelist(client, db_session, monkeypatch):
+    import main as main_module
+    monkeypatch.setattr(main_module, "ADMIN_EMAILS", ["admin@trafficvision.ai"])
+
+    # Email in whitelist => admin
     resp = client.post("/auth/signup", json={
-        "email": "first@trafficvision.ai",
-        "name": "First Admin",
+        "email": "admin@trafficvision.ai",
+        "name": "Admin User",
         "password": "securepassword123",
     })
     assert resp.status_code == 200
@@ -35,10 +39,10 @@ def test_signup_and_first_user_admin(client, db_session):
     assert "access_token" in data
     assert data["user"]["role"] == "admin"
 
-    # Second user should default to "viewer"
+    # Non-whitelisted email => viewer, even if first user
     resp2 = client.post("/auth/signup", json={
-        "email": "second@trafficvision.ai",
-        "name": "Second User",
+        "email": "nonwhitelist@trafficvision.ai",
+        "name": "Regular User",
         "password": "securepassword123",
     })
     assert resp2.status_code == 200
@@ -158,10 +162,13 @@ def test_admin_authorization(client, db_session):
 
 def test_challan_generation_and_status_flow(client, db_session):
     admin = User(email="admin_challan@test.com", name="Admin", password_hash=hash_password("p"), role="admin")
-    db_session.add(admin)
+    viewer = User(email="viewer_challan@test.com", name="Viewer", password_hash=hash_password("p"), role="viewer")
+    db_session.add_all([admin, viewer])
     db_session.commit()
-    token = create_access_token(admin.id, admin.email)
-    headers = {"Authorization": f"Bearer {token}"}
+    admin_token = create_access_token(admin.id, admin.email)
+    viewer_token = create_access_token(viewer.id, viewer.email)
+    admin_headers = {"Authorization": f"Bearer {admin_token}"}
+    viewer_headers = {"Authorization": f"Bearer {viewer_token}"}
 
     # 1. Alert in 'new' status cannot generate challan
     alert = Alert(
@@ -176,7 +183,7 @@ def test_challan_generation_and_status_flow(client, db_session):
     db_session.commit()
     db_session.refresh(alert)
 
-    resp_new = client.get(f"/alerts/{alert.id}/challan", headers=headers)
+    resp_new = client.get(f"/alerts/{alert.id}/challan", headers=admin_headers)
     assert resp_new.status_code == 400
     assert "reviewed" in resp_new.json()["detail"]
 
@@ -185,7 +192,7 @@ def test_challan_generation_and_status_flow(client, db_session):
     db_session.add(pothole_alert)
     db_session.commit()
     db_session.refresh(pothole_alert)
-    resp_pothole = client.get(f"/alerts/{pothole_alert.id}/challan", headers=headers)
+    resp_pothole = client.get(f"/alerts/{pothole_alert.id}/challan", headers=admin_headers)
     assert resp_pothole.status_code == 400
     assert "non-violation" in resp_pothole.json()["detail"]
 
@@ -193,24 +200,50 @@ def test_challan_generation_and_status_flow(client, db_session):
     plate_read = PlateRead(camera_id="camera_1", track_id=101, plate_text="DL01AB1234")
     db_session.add(plate_read)
 
-    # 4. Human-in-the-loop review
+    # 4. Viewer cannot resolve (only admin/reviewer)
+    resp_viewer_resolve = client.post(
+        f"/alerts/{alert.id}/resolve",
+        json={"status": "reviewed", "resolution_notes": "Viewer should be rejected"},
+        headers=viewer_headers,
+    )
+    assert resp_viewer_resolve.status_code == 403
+
+    # 5. Invalid status rejected with 422
+    resp_bad_status = client.post(
+        f"/alerts/{alert.id}/resolve",
+        json={"status": "challan_issued"},  # not allowed via /resolve
+        headers=admin_headers,
+    )
+    assert resp_bad_status.status_code == 422
+
+    # 6. Human-in-the-loop review (admin CAN resolve)
     resp_resolve = client.post(
         f"/alerts/{alert.id}/resolve",
         json={"status": "reviewed", "resolution_notes": "Confirmed by officer #42"},
-        headers=headers,
+        headers=admin_headers,
     )
     assert resp_resolve.status_code == 200
     assert resp_resolve.json()["status"] == "reviewed"
 
-    # 5. Challan generation succeeds and updates status to 'challan_issued'
-    resp_challan = client.get(f"/alerts/{alert.id}/challan", headers=headers)
+    # 7. GET /challan is READ-ONLY (status should NOT change to challan_issued)
+    resp_challan = client.get(f"/alerts/{alert.id}/challan", headers=admin_headers)
     assert resp_challan.status_code == 200
     assert resp_challan.headers["content-type"] == "application/pdf"
-    content = resp_challan.content
-    assert content.startswith(b"%PDF")
+    assert resp_challan.content.startswith(b"%PDF")
 
     db_session.refresh(alert)
+    assert alert.status == "reviewed"  # unchanged - GET is read-only
+
+    # 8. POST /issue advances to challan_issued
+    resp_issue = client.post(f"/alerts/{alert.id}/challan/issue", headers=admin_headers)
+    assert resp_issue.status_code == 200
+    assert resp_issue.json()["status"] == "challan_issued"
+    db_session.refresh(alert)
     assert alert.status == "challan_issued"
+
+    # 9. Cannot re-issue once already challan_issued
+    resp_issue2 = client.post(f"/alerts/{alert.id}/challan/issue", headers=admin_headers)
+    assert resp_issue2.status_code == 422
 
 
 # ============================================================================
@@ -314,3 +347,92 @@ def test_consecutive_violation_confirmation(db_session):
 
     check_wrong_way(cam, track_ww, "car", rev_history)
     assert (cam, track_ww) in alerts.alerted_track_ids["wrong_way"]
+
+
+# ============================================================================
+# 8. FullFrameBox Crop & Downscale Rescaling Test
+# ============================================================================
+
+def test_full_frame_crop_and_rescale(tmp_path, monkeypatch):
+    import numpy as np
+    import cv2
+    from detection.pipeline import FullFrameBox, _resize_for_detection
+    from alerts import _save_evidence_crop
+    import alerts
+
+    monkeypatch.setattr(alerts, "VIOLATIONS_DIR", str(tmp_path))
+
+    # 1. Build a 1280x720 frame with a distinctive colored rectangle at a known position
+    frame = np.zeros((720, 1280, 3), dtype=np.uint8)
+    distinctive_color = (12, 34, 56)
+    x1_full, y1_full, x2_full, y2_full = 800, 400, 1000, 600
+    frame[y1_full:y2_full, x1_full:x2_full] = distinctive_color
+
+    # 2. Simulate 640px downscale
+    resized, scale = _resize_for_detection(frame)
+    assert scale == 0.5
+    assert resized.shape[1] == 640
+
+    # Downscaled coordinates
+    x1_down, y1_down, x2_down, y2_down = int(x1_full * scale), int(y1_full * scale), int(x2_full * scale), int(y2_full * scale)
+
+    # Using raw downscaled box on full frame yields wrong, blank area
+    bad_crop = frame[y1_down:y2_down, x1_down:x2_down]
+    assert np.all(bad_crop == 0)
+
+    # 3. Using FullFrameBox rescaled to full frame
+    ff_box = FullFrameBox(int(x1_down / scale), int(y1_down / scale), int(x2_down / scale), int(y2_down / scale))
+    assert ff_box.xyxy == [(x1_full, y1_full, x2_full, y2_full)]
+
+    # 4. Assert crop used by plate/helmet/evidence path contains that rectangle
+    x1, y1, x2, y2 = ff_box.xyxy[0]
+    crop = frame[y1:y2, x1:x2]
+    assert np.all(crop == distinctive_color)
+
+    evidence_file = _save_evidence_crop(frame, ff_box)
+    assert evidence_file is not None
+    saved_crop = cv2.imread(evidence_file)
+    assert saved_crop is not None
+    assert saved_crop.shape == (200, 200, 3)
+    assert np.all(np.abs(saved_crop.astype(int) - np.array(distinctive_color)) <= 3)
+
+
+# ============================================================================
+# 9. Worker Thread Alert Handling & Main Loop Broadcast Test
+# ============================================================================
+
+def test_save_and_push_alert_worker_thread(db_session):
+    import threading
+    import asyncio
+    import alerts
+
+    dispatched = []
+
+    class DummyLoop:
+        def is_running(self):
+            return True
+
+    dummy_loop = DummyLoop()
+    alerts.set_main_loop(dummy_loop)
+
+    def dummy_run_coroutine_threadsafe(coro, loop):
+        dispatched.append((coro, loop))
+        coro.close()
+
+    orig_run_coroutine = asyncio.run_coroutine_threadsafe
+    asyncio.run_coroutine_threadsafe = dummy_run_coroutine_threadsafe
+    try:
+        def worker():
+            alerts.save_and_push_alert("overspeed", "camera_thread_test", 9999, "Overspeed in thread", speed_kmh=110.0)
+
+        t = threading.Thread(target=worker)
+        t.start()
+        t.join()
+
+        assert len(dispatched) == 1
+        assert dispatched[0][1] is dummy_loop
+    finally:
+        asyncio.run_coroutine_threadsafe = orig_run_coroutine
+        alerts.set_main_loop(None)
+
+

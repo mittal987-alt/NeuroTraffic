@@ -7,6 +7,7 @@ sends with future requests to prove who it is.
 """
 
 import os
+import secrets
 from datetime import datetime, timedelta, timezone
 
 from dotenv import load_dotenv
@@ -21,7 +22,15 @@ from database import User, get_db_session
 
 load_dotenv()
 
-SECRET_KEY = os.getenv("JWT_SECRET_KEY", "insecure-dev-key-change-me")
+_raw_secret = os.getenv("JWT_SECRET_KEY", "")
+if not _raw_secret:
+    _raw_secret = secrets.token_urlsafe(48)
+    print(
+        "[WARNING] JWT_SECRET_KEY is not set. A temporary random key was generated "
+        "for this session. All tokens will be invalidated on restart. "
+        "Set JWT_SECRET_KEY in your .env file for production use."
+    )
+SECRET_KEY = _raw_secret
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7  # 7 days
 

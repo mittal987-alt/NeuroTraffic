@@ -19,7 +19,7 @@ import cv2
 from database import DetectionLog, SessionLocal
 from anpr import read_plate
 from detection.face import detect_face_crop
-from config import ENABLE_FACE_CAPTURE, FACE_RETENTION_DAYS
+from config import ENABLE_FACE_CAPTURE, FACE_RETENTION_DAYS, EVIDENCE_RETENTION_DAYS, EVIDENCE_RETENTION_CHALLAN_DAYS
 
 FACE_IMAGE_DIR = "captured_faces"
 os.makedirs(FACE_IMAGE_DIR, exist_ok=True)
@@ -29,15 +29,23 @@ _last_logged_time: dict[tuple[str, int], float] = {}
 
 def cleanup_old_face_data():
     """
-    Retention job: deletes captured_faces/ files and DetectionLog rows
-    older than FACE_RETENTION_DAYS (default 7 days).
+    Retention job:
+    - Deletes captured_faces/ files and DetectionLog rows older than FACE_RETENTION_DAYS.
+    - Nulls out evidence_path and deletes violations/ crops older than EVIDENCE_RETENTION_DAYS
+      (except challan_issued alerts which are kept for EVIDENCE_RETENTION_CHALLAN_DAYS).
+
+    Uses naive UTC datetimes in DB queries to match SQLite's storage format.
     """
-    cutoff = datetime.now(timezone.utc) - timedelta(days=FACE_RETENTION_DAYS)
+    now_naive = datetime.utcnow()  # naive UTC - matches SQLite's stored format
+    face_cutoff_naive = now_naive - timedelta(days=FACE_RETENTION_DAYS)
+    evidence_cutoff_naive = now_naive - timedelta(days=EVIDENCE_RETENTION_DAYS)
+    evidence_challan_cutoff_naive = now_naive - timedelta(days=EVIDENCE_RETENTION_CHALLAN_DAYS)
+
     cutoff_ts = time.time() - (FACE_RETENTION_DAYS * 86400)
 
     db = SessionLocal()
     try:
-        old_logs = db.query(DetectionLog).filter(DetectionLog.timestamp < cutoff).all()
+        old_logs = db.query(DetectionLog).filter(DetectionLog.timestamp < face_cutoff_naive).all()
         for log in old_logs:
             if log.face_image_path and os.path.exists(log.face_image_path):
                 try:
@@ -56,6 +64,42 @@ def cleanup_old_face_data():
                         os.remove(fpath)
                     except OSError:
                         pass
+
+        # Evidence (violations/) retention: import here to avoid circular import
+        try:
+            from database import Alert
+            # Non-challan evidence: purge after EVIDENCE_RETENTION_DAYS
+            old_alerts = db.query(Alert).filter(
+                Alert.status != "challan_issued",
+                Alert.evidence_path.isnot(None),
+                Alert.timestamp < evidence_cutoff_naive,
+            ).all()
+            for a in old_alerts:
+                if a.evidence_path and os.path.exists(a.evidence_path):
+                    try:
+                        os.remove(a.evidence_path)
+                    except OSError:
+                        pass
+                a.evidence_path = None
+
+            # Challan evidence: purge after EVIDENCE_RETENTION_CHALLAN_DAYS
+            old_challan_alerts = db.query(Alert).filter(
+                Alert.status == "challan_issued",
+                Alert.evidence_path.isnot(None),
+                Alert.timestamp < evidence_challan_cutoff_naive,
+            ).all()
+            for a in old_challan_alerts:
+                if a.evidence_path and os.path.exists(a.evidence_path):
+                    try:
+                        os.remove(a.evidence_path)
+                    except OSError:
+                        pass
+                a.evidence_path = None
+
+            db.commit()
+        except Exception as e:
+            print(f"[Evidence Retention Warning] {e}")
+
     except Exception as e:
         print(f"[Retention Cleanup Warning] {e}")
     finally:
