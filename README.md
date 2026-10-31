@@ -200,8 +200,10 @@ NeuroTraffic/
    DATABASE_URL=sqlite:///./traffic.db
 
    # Security & Roles
+   # If unset, an ephemeral secrets.token_urlsafe(48) is generated at boot
    JWT_SECRET_KEY=your-super-secret-jwt-key-here
    ADMIN_EMAILS=admin@trafficvision.ai
+   ALLOWED_ORIGINS=*
 
    # Signal Mode: "simulated" | "manual" | "api"
    SIGNAL_MODE=simulated
@@ -210,9 +212,13 @@ NeuroTraffic/
    # Privacy & Retention
    ENABLE_FACE_CAPTURE=false
    FACE_RETENTION_DAYS=7
+   EVIDENCE_RETENTION_DAYS=30
+   EVIDENCE_RETENTION_CHALLAN_DAYS=180
 
-   # False-Positive Reduction
+   # False-Positive Reduction & Confirmation Spacing
    CONSECUTIVE_VIOLATION_CHECKS=3
+   CONFIRM_INTERVAL_SEC=1.0
+   MAX_API_ATTEMPTS=8
 
    # Camera Input
    CAMERA_1_VIDEO_PATH=traffic.mp4
@@ -276,8 +282,14 @@ Key tunable options in [backend/config.py](file:///c:/projects/traffic_ai/backen
 | `SIGNAL_MODE` | `"simulated"` | Traffic light cycle controller: `"simulated"`, `"manual"`, or `"api"`. |
 | `SIGNAL_API_URL` | `""` | External HTTP endpoint polled (1s cache, safe green fallback) when `SIGNAL_MODE="api"`. |
 | `ENABLE_FACE_CAPTURE` | `False` | Opt-in toggle for capturing driver face crops (disabled by default for privacy). |
+| `ALLOWED_ORIGINS` | `["*"]` | Allowed CORS origins list. Set explicitly in production with credentials. |
+| `ADMIN_EMAILS` | `[]` | List of email addresses granted the admin role upon registration. |
 | `FACE_RETENTION_DAYS` | `7` | Purge threshold in days for automated face crops and audit log cleanup. |
+| `EVIDENCE_RETENTION_DAYS` | `30` | Retention threshold in days for non-challan evidence crops in violations/. |
+| `EVIDENCE_RETENTION_CHALLAN_DAYS` | `180` | Extended retention threshold in days for challan_issued records. |
 | `CONSECUTIVE_VIOLATION_CHECKS` | `3` | Number of consecutive detections required before raising a violation alert. |
+| `CONFIRM_INTERVAL_SEC` | `1.0` | Minimum spacing in seconds between remote AI confirmation checks per track. |
+| `MAX_API_ATTEMPTS` | `8` | Maximum confirmation check attempts allowed per track before terminating checks. |
 | `CONF_THRESHOLD` | `0.4` | Minimum confidence score for YOLO object detection. |
 | `DETECTION_FRAME_SKIP` | `4` | Runs YOLO every N frames on CPU to ensure high-FPS video streaming. |
 | `SPEED_LIMIT_KMH` | `80.0` | Threshold in km/h above which an overspeed alert is triggered. |
@@ -291,13 +303,14 @@ Key tunable options in [backend/config.py](file:///c:/projects/traffic_ai/backen
 | Method | Endpoint | Auth Required | Description |
 | :--- | :--- | :--- | :--- |
 | `GET` | `/` | Public | System health check and status. |
-| `POST` | `/auth/signup` | Public | Registers a new account (first user / whitelisted emails get admin role). |
+| `POST` | `/auth/signup` | Public | Registers a new account. Admin role assigned strictly if email is in ADMIN_EMAILS. |
 | `POST` | `/auth/login` | Public | Authenticates credentials with rate limiting (5 failed attempts per email+IP / 15 min). |
 | `GET` | `/auth/me` | Bearer Token | Fetches current user profile and role verification. |
 | `GET` | `/events` | Bearer Token | Fetches counting line vehicle crossing events with plate lookups. |
 | `GET` | `/alerts` | Bearer Token | Fetches violation alerts with optional status filtering. |
-| `POST` | `/alerts/{id}/resolve` | Bearer Token | Updates alert review status (`new` -> `reviewed` -> `dismissed`/`challan_issued`). |
-| `GET` | `/alerts/{id}/challan` | Bearer / `?token=` | Generates and streams PDF E-Challan (requires `reviewed` status). |
+| `POST` | `/alerts/{id}/resolve` | **Reviewer / Admin** | Updates alert review status (`reviewed` or `dismissed`). |
+| `GET` | `/alerts/{id}/challan` | Bearer / `?token=` | Read-only: generates and streams PDF E-Challan for `reviewed` or `challan_issued` alerts. |
+| `POST` | `/alerts/{id}/challan/issue` | **Admin Only** | Formalizes notice issuance: transitions status to `challan_issued` and returns PDF URL. |
 | `GET` | `/plates` | Bearer Token | Fetches recent ANPR plate read records. |
 | `GET` | `/potholes` | Bearer Token | Fetches detected road potholes and surface hazards. |
 | `GET` | `/cameras` | Bearer Token | Returns camera configurations, GPS coordinates, and online status. |
@@ -320,6 +333,7 @@ Key tunable options in [backend/config.py](file:///c:/projects/traffic_ai/backen
 NeuroTraffic is engineered with privacy-by-design principles and adheres to the **Digital Personal Data Protection (DPDP) Act**:
 
 - **Data Minimization & Storage**: By default, only municipal vehicle telemetry (class, speeds, timestamps, counting line crossings) and license plates (for verified infractions) are stored. Vehicle crops are stored strictly as evidence snapshots for confirmed infractions.
+- **Evidence Photos Lifecycle**: Evidence crops saved to `violations/` are automatically purged after `EVIDENCE_RETENTION_DAYS` (default 30 days) and have `Alert.evidence_path` nulled out in the database. Infractions with `challan_issued` status are retained for `EVIDENCE_RETENTION_CHALLAN_DAYS` (default 180 days) for statutory dispute resolution.
 - **Opt-In Driver Face Capture**: Facial detection and cropping in `captured_faces/` is strictly opt-in and disabled by default (`ENABLE_FACE_CAPTURE=false`).
 - **Automated Data Retention & Purging**: An automated retention lifecycle scheduler runs on backend startup and every 6 hours thereafter, permanently deleting face crops from disk and purging `detection_logs` rows older than `FACE_RETENTION_DAYS` (default 7 days).
 - **Third-Party Processing Disclosure**: Inference for helmet, seatbelt, and lane detection utilizes the Roboflow Hosted Inference API. Vehicle crops containing cockpit or helmet areas are transmitted over TLS to Roboflow servers strictly for model evaluation.

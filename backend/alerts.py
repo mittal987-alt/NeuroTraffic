@@ -242,9 +242,9 @@ def save_and_push_alert(
     except RuntimeError:
         loop = None
 
-    if loop and loop.is_running():
+    if loop and loop.is_running() and hasattr(loop, "run_in_executor"):
         loop.run_in_executor(None, _do_push)
-    elif _main_loop and _main_loop.is_running():
+    elif _main_loop and _main_loop.is_running() and hasattr(_main_loop, "run_in_executor"):
         _main_loop.run_in_executor(None, _do_push)
     else:
         _do_push()

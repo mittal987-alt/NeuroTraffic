@@ -35,13 +35,8 @@ def calculate_speed_kmh(
     t0, x0, y0 = history[0]
     t1, x1, y1 = history[-1]
 
-    # Calculate real elapsed seconds
-    # If timestamps are float monotonic times:
-    time_elapsed = t1 - t0
-    # If legacy integer frames were passed instead of seconds:
-    if isinstance(t0, int) and isinstance(t1, int) and fps and fps > 0:
-        time_elapsed = (t1 - t0) / fps
-
+    # Real elapsed seconds (history stores timestamp_seconds)
+    time_elapsed = float(t1 - t0)
     if time_elapsed <= 0:
         return None
 

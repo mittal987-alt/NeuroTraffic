@@ -412,6 +412,9 @@ def test_save_and_push_alert_worker_thread(db_session):
         def is_running(self):
             return True
 
+        def run_in_executor(self, executor, func):
+            func()
+
     dummy_loop = DummyLoop()
     alerts.set_main_loop(dummy_loop)
 
@@ -434,5 +437,219 @@ def test_save_and_push_alert_worker_thread(db_session):
     finally:
         asyncio.run_coroutine_threadsafe = orig_run_coroutine
         alerts.set_main_loop(None)
+
+
+# ============================================================================
+# 10. Helmet Confirmation Flow & Bounded Attempts (Mocked API)
+# ============================================================================
+
+@pytest.mark.asyncio
+async def test_helmet_consecutive_confirmation_flow(monkeypatch):
+    import numpy as np
+    from detection import helmet
+
+    # Clear state
+    helmet.helmet_checked_track_ids.clear()
+    helmet._helmet_consecutive.clear()
+    helmet._helmet_last_check.clear()
+    helmet._helmet_in_flight.clear()
+    helmet._helmet_attempts.clear()
+
+    frame = np.zeros((100, 100, 3), dtype=np.uint8)
+    box = (10, 10, 50, 50)
+    cam = "cam_test"
+
+    # 1. Spaced violations: 3 consecutive "without_helmet" checks trigger alert
+    track_1 = 101
+    calls = []
+
+    def mock_check_helmet_violation(crop):
+        calls.append("violation")
+        return "without_helmet"
+
+    monkeypatch.setattr(helmet, "check_helmet", mock_check_helmet_violation)
+
+    # 1st violation
+    await helmet.check_helmet_and_alert(cam, track_1, frame, box)
+    assert (cam, track_1) not in helmet.helmet_checked_track_ids
+    assert helmet._helmet_consecutive[(cam, track_1)] == 1
+
+    # Calling immediately before CONFIRM_INTERVAL_SEC should be rate-limited
+    await helmet.check_helmet_and_alert(cam, track_1, frame, box)
+    assert len(calls) == 1  # no new API call
+
+    # Advance last check time
+    helmet._helmet_last_check[(cam, track_1)] -= 2.0
+    await helmet.check_helmet_and_alert(cam, track_1, frame, box)
+    assert (cam, track_1) not in helmet.helmet_checked_track_ids
+    assert helmet._helmet_consecutive[(cam, track_1)] == 2
+
+    # 3rd spaced violation triggers confirmation
+    helmet._helmet_last_check[(cam, track_1)] -= 2.0
+    await helmet.check_helmet_and_alert(cam, track_1, frame, box)
+    assert (cam, track_1) in helmet.helmet_checked_track_ids
+    assert len(calls) == 3
+
+    # 2. Reset on OK: 2 violations then 'with_helmet' -> no alert and resets counter
+    track_2 = 102
+    helmet._helmet_last_check[(cam, track_2)] = 0.0
+    await helmet.check_helmet_and_alert(cam, track_2, frame, box)
+    assert helmet._helmet_consecutive[(cam, track_2)] == 1
+
+    helmet._helmet_last_check[(cam, track_2)] -= 2.0
+    await helmet.check_helmet_and_alert(cam, track_2, frame, box)
+    assert helmet._helmet_consecutive[(cam, track_2)] == 2
+
+    # Now rider has helmet
+    monkeypatch.setattr(helmet, "check_helmet", lambda crop: "with_helmet")
+    helmet._helmet_last_check[(cam, track_2)] -= 2.0
+    await helmet.check_helmet_and_alert(cam, track_2, frame, box)
+    assert helmet._helmet_consecutive[(cam, track_2)] == 0
+    assert (cam, track_2) in helmet.helmet_checked_track_ids
+
+    # 3. None results: do not count as violation, do not reset counter, retry allowed
+    track_3 = 103
+    monkeypatch.setattr(helmet, "check_helmet", lambda crop: None)
+    helmet._helmet_last_check[(cam, track_3)] = 0.0
+    await helmet.check_helmet_and_alert(cam, track_3, frame, box)
+    assert helmet._helmet_consecutive[(cam, track_3)] == 0
+    assert (cam, track_3) not in helmet.helmet_checked_track_ids
+    assert helmet._helmet_attempts[(cam, track_3)] == 1
+
+    # 4. Attempts capped at MAX_API_ATTEMPTS
+    track_4 = 104
+    api_calls_count = 0
+
+    def counting_api(crop):
+        nonlocal api_calls_count
+        api_calls_count += 1
+        return None
+
+    monkeypatch.setattr(helmet, "check_helmet", counting_api)
+    for _ in range(helmet.MAX_API_ATTEMPTS + 3):
+        helmet._helmet_last_check[(cam, track_4)] = 0.0
+        await helmet.check_helmet_and_alert(cam, track_4, frame, box)
+
+    assert api_calls_count == helmet.MAX_API_ATTEMPTS
+    assert helmet._helmet_attempts[(cam, track_4)] == helmet.MAX_API_ATTEMPTS
+
+
+# ============================================================================
+# 11. Speed Estimation: File vs Live Stream Timestamp Modes
+# ============================================================================
+
+def test_speed_file_vs_live_modes():
+    # PIXELS_PER_METER = 8.0
+    # 80 pixels = 10.0 meters over 1.0 second elapsed => 36.0 km/h
+    # Mode 1: Live stream with monotonic timestamps
+    live_history = deque([
+        (100.0, 50, 100),
+        (100.5, 90, 100),
+        (101.0, 130, 100),
+    ])
+    speed_live = calculate_speed_kmh(live_history)
+    assert speed_live == 36.0
+
+    # Mode 2: Video file with frame_count / fps timestamps
+    fps = 30.0
+    file_history = deque([
+        (0.0 / fps, 50, 100),
+        (15.0 / fps, 90, 100),
+        (30.0 / fps, 130, 100),
+    ])
+    speed_file = calculate_speed_kmh(file_history, fps=fps)
+    assert speed_file == 36.0
+
+
+# ============================================================================
+# 12. Data Retention Cutoff on In-Memory SQLite
+# ============================================================================
+
+def test_data_retention_cutoff_sqlite(db_session, tmp_path, monkeypatch):
+    from datetime import timedelta
+    from detection.full_log import cleanup_old_face_data
+    from database import DetectionLog, Alert
+    import detection.full_log as full_log_module
+
+    # Create dummy violation files
+    violations_dir = tmp_path / "violations"
+    violations_dir.mkdir()
+    faces_dir = tmp_path / "captured_faces"
+    faces_dir.mkdir()
+
+    monkeypatch.setattr(full_log_module, "FACE_IMAGE_DIR", str(faces_dir))
+
+    old_face_file = faces_dir / "old_face.jpg"
+    old_face_file.write_text("face")
+
+    old_violation_file = violations_dir / "old_viol.jpg"
+    old_violation_file.write_text("violation")
+
+    challan_violation_file = violations_dir / "challan_viol.jpg"
+    challan_violation_file.write_text("challan")
+
+    fresh_violation_file = violations_dir / "fresh_viol.jpg"
+    fresh_violation_file.write_text("fresh")
+
+    now_naive = datetime.now(timezone.utc).replace(tzinfo=None)
+
+    # 1. DetectionLog older than 7 days
+    old_log = DetectionLog(
+        camera_id="cam_1",
+        track_id=1,
+        face_image_path=str(old_face_file),
+        timestamp=now_naive - timedelta(days=10),
+    )
+    # 2. Alert (non-challan) older than 30 days
+    old_alert = Alert(
+        alert_type="overspeed",
+        message="Overspeed 95 km/h",
+        camera_id="cam_1",
+        status="reviewed",
+        evidence_path=str(old_violation_file),
+        timestamp=now_naive - timedelta(days=35),
+    )
+    # 3. Challan issued alert: 60 days old (should NOT be deleted before 180 days)
+    challan_alert = Alert(
+        alert_type="overspeed",
+        message="Overspeed 110 km/h",
+        camera_id="cam_1",
+        status="challan_issued",
+        evidence_path=str(challan_violation_file),
+        timestamp=now_naive - timedelta(days=60),
+    )
+    # 4. Fresh alert: 2 days old
+    fresh_alert = Alert(
+        alert_type="overspeed",
+        message="Overspeed 85 km/h",
+        camera_id="cam_1",
+        status="new",
+        evidence_path=str(fresh_violation_file),
+        timestamp=now_naive - timedelta(days=2),
+    )
+
+    db_session.add_all([old_log, old_alert, challan_alert, fresh_alert])
+    db_session.commit()
+
+    old_log_id = old_log.id
+    cleanup_old_face_data()
+
+    # Re-query
+    db_session.expire_all()
+    assert db_session.query(DetectionLog).filter(DetectionLog.id == old_log_id).first() is None
+    assert not old_face_file.exists()
+
+    db_session.refresh(old_alert)
+    assert old_alert.evidence_path is None
+    assert not old_violation_file.exists()
+
+    db_session.refresh(challan_alert)
+    assert challan_alert.evidence_path == str(challan_violation_file)
+    assert challan_violation_file.exists()
+
+    db_session.refresh(fresh_alert)
+    assert fresh_alert.evidence_path == str(fresh_violation_file)
+    assert fresh_violation_file.exists()
+
 
 

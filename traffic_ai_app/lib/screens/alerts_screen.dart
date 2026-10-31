@@ -316,7 +316,7 @@ class _AlertsScreenState extends State<AlertsScreen> with SingleTickerProviderSt
                         side: BorderSide(color: Colors.indigo.shade200),
                         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
                       ),
-                      onPressed: () => _showChallanDialog(alert),
+                      onPressed: () => _handleChallanAction(alert),
                     ),
                     if (showResolveButton)
                       ElevatedButton(
@@ -333,8 +333,39 @@ class _AlertsScreenState extends State<AlertsScreen> with SingleTickerProviderSt
     );
   }
 
-  void _showChallanDialog(AlertItem alert) {
-    final challanUrl = _api.getChallanUrl(alert.id);
+  Future<void> _handleChallanAction(AlertItem alert) async {
+    if (alert.status == 'new') {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Alert must be reviewed before an e-challan can be issued.'),
+          backgroundColor: Colors.orange,
+        ),
+      );
+      return;
+    }
+
+    try {
+      if (alert.status == 'reviewed') {
+        await _api.issueChallan(alert.id);
+        _loadAlerts();
+      }
+      final challanUrl = await _api.getAuthenticatedChallanUrl(alert.id);
+      if (mounted) {
+        _showChallanDialog(alert, challanUrl);
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Failed to process challan: $e'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    }
+  }
+
+  void _showChallanDialog(AlertItem alert, String challanUrl) {
     showDialog(
       context: context,
       builder: (context) => AlertDialog(
@@ -372,7 +403,7 @@ class _AlertsScreenState extends State<AlertsScreen> with SingleTickerProviderSt
               Navigator.pop(context);
               ScaffoldMessenger.of(context).showSnackBar(
                 SnackBar(
-                  content: Text('E-Challan generated: $challanUrl'),
+                  content: Text('E-Challan ready: $challanUrl'),
                   duration: const Duration(seconds: 4),
                 ),
               );

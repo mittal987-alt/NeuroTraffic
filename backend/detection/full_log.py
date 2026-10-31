@@ -36,7 +36,7 @@ def cleanup_old_face_data():
 
     Uses naive UTC datetimes in DB queries to match SQLite's storage format.
     """
-    now_naive = datetime.utcnow()  # naive UTC - matches SQLite's stored format
+    now_naive = datetime.now(timezone.utc).replace(tzinfo=None)  # naive UTC - matches SQLite's stored format
     face_cutoff_naive = now_naive - timedelta(days=FACE_RETENTION_DAYS)
     evidence_cutoff_naive = now_naive - timedelta(days=EVIDENCE_RETENTION_DAYS)
     evidence_challan_cutoff_naive = now_naive - timedelta(days=EVIDENCE_RETENTION_CHALLAN_DAYS)

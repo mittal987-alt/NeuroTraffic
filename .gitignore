@@ -100,9 +100,11 @@ yolo*.pt
 *.sqlite3
 traffic.db
 
-# Generated Face Captures & Violation Challans
+# Generated Face Captures, Evidence Crops & Violation Challans
 captured_faces/
 backend/captured_faces/
+violations/
+backend/violations/
 challans/
 backend/challans/
 *.pdf

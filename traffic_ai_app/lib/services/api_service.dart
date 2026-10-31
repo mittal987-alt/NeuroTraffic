@@ -219,6 +219,24 @@ class ApiService {
     }
   }
 
+  Future<Map<String, dynamic>> issueChallan(int alertId) async {
+    final headers = await _authHeaders();
+    final response = await http.post(
+      Uri.parse('$baseUrl/alerts/$alertId/challan/issue'),
+      headers: headers,
+    );
+    if (response.statusCode == 200) {
+      return jsonDecode(response.body);
+    } else {
+      try {
+        final error = jsonDecode(response.body);
+        throw Exception(error['detail'] ?? 'Failed to issue challan');
+      } catch (_) {
+        throw Exception('Failed to issue challan (status ${response.statusCode})');
+      }
+    }
+  }
+
   String getChallanUrl(int alertId) => '$baseUrl/alerts/$alertId/challan';
 
   Future<String> getAuthenticatedChallanUrl(int alertId) async {

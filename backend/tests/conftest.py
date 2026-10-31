@@ -58,6 +58,11 @@ detection.emergency.SessionLocal = database.SessionLocal
 import detection.pipeline
 detection.pipeline.SessionLocal = database.SessionLocal
 
+import main
+async def _mock_run_all_camera_pipelines():
+    pass
+main.run_all_camera_pipelines = _mock_run_all_camera_pipelines
+
 
 @pytest.fixture(autouse=True)
 def clean_db():
